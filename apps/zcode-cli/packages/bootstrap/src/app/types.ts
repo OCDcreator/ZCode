@@ -289,6 +289,7 @@ export interface SetLocaleResult {
 }
 
 export interface ZCodeApp {
+  readBackgroundTaskJournal(taskId: string): Promise<import("@zcode/adapters/exec").BackgroundTaskJournalRecord | null>;
   readonly sessionId: SessionId;
   readonly traceId: string;
   readonly runtime: AgentRuntime;

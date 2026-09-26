@@ -1,4 +1,5 @@
 import { join } from "node:path";
+import { BackgroundTaskJournal } from "./background-task-journal.js";
 import { resolveBashMaxOutputLength } from "./bash-output-policy.js";
 import { ShellInitSnapshotManager, cleanupStaleShellInitSnapshots } from "./shell-init-snapshot.js";
 import { OutputCollector, type AggregatePersistedOutputBudget } from "./output-collector.js";
@@ -28,6 +29,7 @@ import type {
 } from "@zcode/contracts";
 
 export class NodeExecutionAdapterBase {
+  protected readonly backgroundTaskJournal?: BackgroundTaskJournal;
   protected readonly activeExecutions = new Map<string, ActiveExecutionRecord>();
 
   protected readonly backgroundTasks = new Map<string, BackgroundTaskRecord>();
@@ -46,6 +48,9 @@ export class NodeExecutionAdapterBase {
 
   constructor(options: NodeExecutionAdapterOptions = {}) {
     this.options = options;
+    if (options.backgroundTaskJournalRoot) {
+      this.backgroundTaskJournal = new BackgroundTaskJournal(options.backgroundTaskJournalRoot);
+    }
     const rootDir = options.outputRootDir ?? resolveDefaultOutputRootDir(options.processEnv);
     this.shellInitRetentionCleanup = cleanupStaleShellInitSnapshots({ rootDir }).catch(
       () => undefined,
@@ -157,6 +162,8 @@ export class NodeExecutionAdapterBase {
       status: "running",
       taskId: args.taskId,
       sessionId: args.request.trace?.sessionId,
+      toolCallId: typeof args.request.trace?.attributes?.toolCallId === "string"
+        ? args.request.trace.attributes.toolCallId : undefined,
       isBash: isBashMergedOutputRequest(args.request),
       legacyOutputEncoding: null,
       ...args.outputPaths,
@@ -188,7 +195,60 @@ export class NodeExecutionAdapterBase {
     record.pid = result.pid ?? record.pid;
     record.result = result;
     record.error = result.error;
+    // 终态由观察子进程退出的执行者写入；不能从启动调用或输出文件推断。
+    if (!record.supervised && this.backgroundTaskJournal && record.sessionId && record.toolCallId) {
+      const sessionId = record.sessionId;
+      const toolCallId = record.toolCallId;
+      const write = async () => {
+        await record.journalWrite;
+        if (!record.journaled) return;
+        await this.backgroundTaskJournal?.write({
+          version: 1,
+          sessionId,
+          taskId: record.taskId,
+          toolCallId,
+          status: result.status,
+          startedAt: record.startedAt.getTime(),
+          updatedAt: Date.now(),
+          completedAt: result.completedAt.getTime(),
+          exitCode: result.exitCode,
+          ownerPid: process.pid,
+        });
+      };
+      record.journalWrite = write();
+    }
     record.resolveCompletion(this.snapshot(record));
+  }
+
+  protected async persistBackgroundLaunch(record: BackgroundTaskRecord): Promise<void> {
+    if (!this.backgroundTaskJournal || !record.sessionId || !record.toolCallId) return;
+    const write = this.backgroundTaskJournal.write({
+      version: 1,
+      sessionId: record.sessionId,
+      taskId: record.taskId,
+      toolCallId: record.toolCallId,
+      status: "running",
+      startedAt: record.startedAt.getTime(),
+      updatedAt: Date.now(),
+      ownerPid: process.pid,
+    });
+    record.journalWrite = write;
+    await write;
+    record.journaled = true;
+  }
+
+  protected async verifiedBackgroundSnapshot(
+    record: BackgroundTaskRecord,
+  ): Promise<BackgroundExecutionSnapshot | undefined> {
+    if (!record.supervised || record.status === "running") return this.snapshot(record);
+    // The wrapper can exit without its child result (for example the supervisor
+    // itself is killed). The wrapper's exit code is not the Bash terminal state.
+    if (!record.completedAt) await record.completion;
+    await record.journalWrite;
+    const persisted = record.sessionId
+      ? await this.backgroundTaskJournal?.read(record.sessionId, record.taskId)
+      : null;
+    return persisted?.status === record.status ? this.snapshot(record) : undefined;
   }
 
   protected snapshot(record: BackgroundTaskRecord): BackgroundExecutionSnapshot {

@@ -47,6 +47,8 @@ export class NodeExecutionAdapterLifecycle extends NodeExecutionAdapterRun {
       taskId,
       request,
     });
+    await this.persistBackgroundLaunch(record);
+    record.supervised = record.journaled && isBashMergedOutputRequest(runRequest);
     this.backgroundTasks.set(taskId, record);
 
     const externalAbort = () => controller.abort();
@@ -59,6 +61,15 @@ export class NodeExecutionAdapterLifecycle extends NodeExecutionAdapterRun {
 
     void this.run(runRequest, {
       ...options,
+      ...(record.supervised && record.sessionId && record.toolCallId && this.options.backgroundTaskJournalRoot
+        ? { supervisedBackgroundTask: {
+            journalRoot: this.options.backgroundTaskJournalRoot,
+            sessionId: record.sessionId,
+            taskId,
+            toolCallId: record.toolCallId,
+            startedAt: startedAt.getTime(),
+          } }
+        : {}),
       signal: controller.signal,
       onOutputEncodingResolved: (encoding) => {
         record.legacyOutputEncoding = encoding;
@@ -141,6 +152,9 @@ export class NodeExecutionAdapterLifecycle extends NodeExecutionAdapterRun {
       taskId,
       request,
     });
+    // 自动转后台也必须先有 durable identity；极短前台任务无需对外暴露此 ID。
+    await this.persistBackgroundLaunch(record);
+    record.supervised = record.journaled;
 
     type LifecycleState = "preparing" | "foreground" | "backgrounded" | "settling" | "terminal";
     let state: LifecycleState = "preparing";
@@ -223,6 +237,15 @@ export class NodeExecutionAdapterLifecycle extends NodeExecutionAdapterRun {
 
     const backgroundRunOptions: InternalExecutionRunOptions = {
       ...options,
+      ...(record.supervised && record.sessionId && record.toolCallId && this.options.backgroundTaskJournalRoot
+        ? { supervisedBackgroundTask: {
+            journalRoot: this.options.backgroundTaskJournalRoot,
+            sessionId: record.sessionId,
+            taskId,
+            toolCallId: record.toolCallId,
+            startedAt: startedAt.getTime(),
+          } }
+        : {}),
       signal: controller.signal,
       onOutputEncodingResolved: (encoding) => {
         record.legacyOutputEncoding = encoding;
@@ -264,6 +287,7 @@ export class NodeExecutionAdapterLifecycle extends NodeExecutionAdapterRun {
           record,
           this.normalizeBashBackgroundOutputLimitResult(unprocessedResult, persistedLimitReached),
         );
+        await record.journalWrite;
         return;
       }
       if (state === "terminal") return;
@@ -338,7 +362,8 @@ export class NodeExecutionAdapterLifecycle extends NodeExecutionAdapterRun {
 
   async getBackgroundTask(taskId: string): Promise<BackgroundExecutionSnapshot | undefined> {
     const record = this.backgroundTasks.get(taskId);
-    return record ? this.snapshot(record) : undefined;
+    if (!record) return undefined;
+    return await this.verifiedBackgroundSnapshot(record);
   }
 
   async waitForBackgroundTask(
@@ -347,10 +372,15 @@ export class NodeExecutionAdapterLifecycle extends NodeExecutionAdapterRun {
   ): Promise<BackgroundExecutionSnapshot | undefined> {
     const record = this.backgroundTasks.get(taskId);
     if (!record) return undefined;
-    if (record.status !== "running") return this.snapshot(record);
+    if (record.status !== "running") {
+      return await this.verifiedBackgroundSnapshot(record);
+    }
     if (options.signal?.aborted) return this.snapshot(record);
 
-    if (!options.signal) return await record.completion;
+    if (!options.signal) {
+      await record.completion;
+      return await this.verifiedBackgroundSnapshot(record);
+    }
 
     return await new Promise<BackgroundExecutionSnapshot>((resolve) => {
       const abort = () => resolve(this.snapshot(record));
@@ -369,6 +399,7 @@ export class NodeExecutionAdapterLifecycle extends NodeExecutionAdapterRun {
       record.status = "cancelled";
       record.controller.abort();
     }
+    if (record.supervised) return await this.waitForBackgroundTask(taskId);
     return this.snapshot(record);
   }
 }

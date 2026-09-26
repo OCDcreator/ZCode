@@ -1,5 +1,6 @@
 import { spawn, type ChildProcess } from "node:child_process";
 import { BashFileOutput } from "./bash-file-output.js";
+import { superviseBackgroundBash, waitForBackgroundBashSupervisorReady } from "./background-bash-supervisor.js";
 import { readCapturedCwd } from "./cwd-capture.js";
 import { defaultCwdDialect } from "./execution-command.js";
 import { NodeExecutionAdapterProcess } from "./node-execution-adapter-process.js";
@@ -135,13 +136,23 @@ export class NodeExecutionAdapterRun extends NodeExecutionAdapterProcess {
       terminationRequested = true;
       // root shell exit 不代表其进程组和继承 pipe 的后代已经退出。
       // cancel/close 必须在组长 exit 后仍能清理整个 execution，避免 orphan。
-      this.terminateProcessTree(startedChild, useBashMergedOutput);
-      if (file) {
+      if (internalOptions.supervisedBackgroundTask) {
+        // 监督者必须活到 Bash 进程树退出并持久写入终态；原清理器会连监督者一起 SIGKILL。
+        if (startedChild.connected) startedChild.send({
+          type: "stop",
+          reason: timedOut ? "timeout" : outputLimitExceeded ? "output_limit" : "cancelled",
+        });
+        else startedChild.kill("SIGTERM");
+      } else {
+        this.terminateProcessTree(startedChild, useBashMergedOutput);
+      }
+      if (file && !internalOptions.supervisedBackgroundTask) {
         finishExit({ code: timedOut ? 143 : 137 });
         return;
       }
       forceExitTimer = setTimeout(() => {
         if (!exited) {
+          if (internalOptions.supervisedBackgroundTask) startedChild.kill("SIGKILL");
           finishExit({
             signal: "SIGKILL",
           });
@@ -201,11 +212,10 @@ export class NodeExecutionAdapterRun extends NodeExecutionAdapterProcess {
         ];
       }
 
-      const spawnedChild = spawn(
-        prepared.command.file,
-        prepared.command.args,
-        prepared.spawnOptions,
-      );
+      const supervised = internalOptions.supervisedBackgroundTask
+        ? superviseBackgroundBash(prepared.command, prepared.spawnOptions, internalOptions.supervisedBackgroundTask)
+        : { file: prepared.command.file, args: prepared.command.args, options: prepared.spawnOptions };
+      const spawnedChild = spawn(supervised.file, supervised.args, supervised.options);
       child = spawnedChild;
       finishResourceTelemetry = this.trackBashResources(spawnedChild, useBashMergedOutput, () => ({
         timedOut,
@@ -231,6 +241,10 @@ export class NodeExecutionAdapterRun extends NodeExecutionAdapterProcess {
           }),
         );
       });
+      if ("configuration" in supervised) {
+        if (!spawnedChild.connected) throw new Error("Background Bash supervisor IPC unavailable");
+        spawnedChild.send({ type: "launch", configuration: supervised.configuration });
+      }
 
       const closePromise = new Promise<void>((resolve) => {
         spawnedChild.once("close", () => {
@@ -240,6 +254,9 @@ export class NodeExecutionAdapterRun extends NodeExecutionAdapterProcess {
       });
 
       await file?.close();
+      if ("configuration" in supervised) {
+        await waitForBackgroundBashSupervisorReady(spawnedChild);
+      }
       const watchBashLimit = () => {
         if (!file || exited || stopRequested) return;
         file.watchLimit(this.persistedOutputLimit(request), () => requestStop("output_limit"));
@@ -327,7 +344,9 @@ export class NodeExecutionAdapterRun extends NodeExecutionAdapterProcess {
         ? { text: "", bytes: 0, truncated: false }
         : stderr!.result();
       const completedAt = new Date();
-      if (file && outputLimitExceeded) cancelled = true;
+      // 监督者把输出超限写为 failed；包装层也必须保持同一终态，否则
+      // 同 ID 的 journal 校验会拒绝真实结果。旧非监督路径维持原行为。
+      if (file && outputLimitExceeded && !internalOptions.supervisedBackgroundTask) cancelled = true;
       const baseStatus = this.statusFromExit(exitState, timedOut, cancelled, outputLimitExceeded);
       const stdinWriteError = inputFailure();
       const unexpectedStdinFailure =
@@ -365,6 +384,9 @@ export class NodeExecutionAdapterRun extends NodeExecutionAdapterProcess {
       this.emitResult(options, result);
       return result;
     } catch (error) {
+      if (child && internalOptions.supervisedBackgroundTask && !exited) {
+        this.terminateProcessTree(child, true);
+      }
       if (!child) await file?.discard();
       if (stopRequested || this.closePromise || options.signal?.aborted) {
         return createPreSpawnStoppedResult();

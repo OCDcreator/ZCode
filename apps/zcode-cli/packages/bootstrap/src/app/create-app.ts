@@ -6,6 +6,7 @@ import {
 import { createNodeLoggerFactory } from "@zcode/adapters/logging";
 import { createConfig, resolvePath } from "@zcode/adapters/config";
 import {
+  BackgroundTaskJournal,
   createNodeExecutionAdapter,
   resolveEffectiveBashShellSelection,
 } from "@zcode/adapters/exec";
@@ -392,6 +393,7 @@ export async function createZCodeApp(options: ZCodeAppOptions): Promise<ZCodeApp
     const executionPort =
       options.executionPort ??
       createNodeExecutionAdapter({
+        backgroundTaskJournalRoot: join(cliStorageRoot, "background-task-journal"),
         onToolExecResource: options.onToolExecResource,
         network: {
           httpProxy: configResult.config.network.httpProxy,
@@ -921,6 +923,18 @@ export async function createZCodeApp(options: ZCodeAppOptions): Promise<ZCodeApp
     };
     return {
       sessionId,
+      readBackgroundTaskJournal: async (taskId) => {
+        const task = await new BackgroundTaskJournal(
+          join(cliStorageRoot, "background-task-journal"),
+        ).read(String(sessionId), taskId);
+        // running 行只证明已启动。监督者若单独死亡，旧 owner PID 仍等于
+        // 当前进程；必须再核对执行适配器仍拥有同一活动任务。
+        if (task?.status === "running" && task.ownerPid === process.pid) {
+          const active = await executionPort.getBackgroundTask?.(taskId);
+          if (!active || active.status !== "running") return null;
+        }
+        return task;
+      },
       traceId: traceContext.traceId,
       runtime,
       respondWorkspaceHookReview: (input) =>

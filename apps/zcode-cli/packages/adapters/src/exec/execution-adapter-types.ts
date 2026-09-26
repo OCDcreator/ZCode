@@ -18,6 +18,10 @@ export interface ExitState {
 
 export interface BackgroundTaskRecord extends BackgroundExecutionSnapshot {
   sessionId?: string;
+  toolCallId?: string;
+  journaled?: boolean;
+  journalWrite?: Promise<void>;
+  supervised?: boolean;
   isBash: boolean;
   legacyOutputEncoding: string | null;
   completion: Promise<BackgroundExecutionSnapshot>;
@@ -33,6 +37,13 @@ export interface ExecutionOutputPaths {
 }
 
 export interface InternalExecutionRunOptions extends ExecutionRunOptions {
+  supervisedBackgroundTask?: {
+    journalRoot: string;
+    sessionId: string;
+    taskId: string;
+    toolCallId: string;
+    startedAt: number;
+  };
   onOutputEncodingResolved?: (encoding: string | null) => void;
   /** Bash 移交时停止前台预览并重启文件 watchdog；不复制进程或输出。 */
   bashLifecycle?: {
@@ -72,6 +83,7 @@ export interface ActiveExecutionRecord {
 }
 
 export interface NodeExecutionAdapterOptions {
+  backgroundTaskJournalRoot?: string;
   onToolExecResource?: (sample: ZCodeToolExecResource) => void;
   outputRootDir?: string;
   maxPersistedOutputBytes?: number;

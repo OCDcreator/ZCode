@@ -38,6 +38,7 @@ import {
   readEvents,
   readMessages,
   readSession,
+  readBackgroundTask,
   resumeSession,
   sendPrompt,
   setMode,
@@ -576,6 +577,8 @@ export class ZCodeProtocolAgentServer {
         return await listSessionSubagents(this.context, request.params);
       case zcodeProtocolMethods.sessionRead:
         return await readSession(this.context, request.params);
+      case zcodeProtocolMethods.sessionBackgroundTaskRead:
+        return await readBackgroundTask(this.context, request.params);
       case zcodeProtocolMethods.sessionMessages:
         return await readMessages(this.context, request.params);
       case zcodeProtocolMethods.sessionEvents:
@@ -676,7 +679,7 @@ export class ZCodeProtocolAgentServer {
       case zcodeProtocolMethods.processChildProcesses:
         return listChildProcesses(this.context.deps.mcpTelemetry?.listProcesses() ?? []);
       case zcodeProtocolMethods.runtimeCapabilities:
-        return { independentPlanState: true };
+        return { independentPlanState: true, backgroundTaskRead: true };
       case zcodeProtocolMethods.pluginsMarketplaceAdd:
         return await this.withPluginOperationSignal(request, (signal) =>
           addPluginMarketplace(this.context, request.params, signal),

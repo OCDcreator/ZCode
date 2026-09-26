@@ -192,6 +192,7 @@ function createRuntimeDeps(
     executionPort:
       deps.appOptions.executionPort ??
       createNodeExecutionAdapter({
+        backgroundTaskJournalRoot: join(deps.storageRoot, "cli", "background-task-journal"),
         onToolExecResource: deps.appOptions.onToolExecResource,
         network: {
           httpProxy: deps.configResult.config.network.httpProxy,

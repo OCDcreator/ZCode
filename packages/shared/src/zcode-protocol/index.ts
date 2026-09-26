@@ -76,6 +76,7 @@ export const ZCODE_PROTOCOL_VERSION = 1 as const;
 export const ZCODE_PROTOCOL_V4_WIRE_VERSION = 3 as const;
 export const zcodeRuntimeCapabilitiesSchema = z.object({
   independentPlanState: z.boolean().optional(),
+  backgroundTaskRead: z.boolean().optional(),
 });
 export const zcodeProtocolErrorCodes = {
   sessionUnavailable: -32004,
@@ -1655,6 +1656,38 @@ export const zcodeSessionReadParamsSchema = z
   })
   .strict();
 export type ZCodeSessionReadParams = z.infer<typeof zcodeSessionReadParamsSchema>;
+
+export const zcodeSessionBackgroundTaskReadParamsSchema = z
+  .object({
+    sessionId: nonEmptyString,
+    taskId: nonEmptyString,
+  })
+  .strict();
+export type ZCodeSessionBackgroundTaskReadParams = z.infer<
+  typeof zcodeSessionBackgroundTaskReadParamsSchema
+>;
+
+export const zcodeSessionBackgroundTaskReadResultSchema = z
+  .object({
+    sessionId: nonEmptyString,
+    taskId: nonEmptyString,
+    status: z.enum([
+      "running",
+      "completed",
+      "failed",
+      "timed_out",
+      "cancelled",
+      "spawn_error",
+      "unknown",
+    ]),
+    startedAt: timestampMsSchema.optional(),
+    completedAt: timestampMsSchema.optional(),
+    exitCode: z.number().int().optional(),
+  })
+  .strict();
+export type ZCodeSessionBackgroundTaskReadResult = z.infer<
+  typeof zcodeSessionBackgroundTaskReadResultSchema
+>;
 
 export const zcodeSessionMessagesParamsSchema = z
   .object({
@@ -3569,6 +3602,7 @@ export const zcodeProtocolMethods = {
   sessionSubagents: "session/subagents",
   sessionRequestRuntimePreferences: "session/requestRuntimePreferences",
   sessionRead: "session/read",
+  sessionBackgroundTaskRead: "session/backgroundTaskRead",
   sessionMessages: "session/messages",
   sessionEvents: "session/events",
   sessionDebug: "session/debug",

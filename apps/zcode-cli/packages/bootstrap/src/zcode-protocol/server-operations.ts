@@ -55,6 +55,8 @@ import {
   zcodeSessionListParamsSchema,
   zcodeSessionMessagesParamsSchema,
   zcodeSessionReadParamsSchema,
+  zcodeSessionBackgroundTaskReadParamsSchema,
+  type ZCodeSessionBackgroundTaskReadResult,
   zcodeSessionRuntimePreferencesResultSchema,
   zcodeSessionResumeParamsSchema,
   zcodeSessionSendParamsSchema,
@@ -1830,6 +1832,24 @@ export async function readSession(context: ZCodeProtocolAgentServerContext, rawP
     messageLimit: params.messageLimit,
     modelAvailability: "current",
   });
+}
+
+export async function readBackgroundTask(context: ZCodeProtocolAgentServerContext, rawParams: unknown): Promise<ZCodeSessionBackgroundTaskReadResult> {
+  const params = parseParams(zcodeSessionBackgroundTaskReadParamsSchema, rawParams);
+  const record = requireSession(context, params.sessionId, { operation: "session_read" });
+  const task = await record.app.readBackgroundTaskJournal(params.taskId);
+  if (!task) return { sessionId: params.sessionId, taskId: params.taskId, status: "unknown" };
+  if (task.status === "running" && task.ownerPid !== process.pid) {
+    return { sessionId: params.sessionId, taskId: params.taskId, status: "unknown" };
+  }
+  return {
+    sessionId: task.sessionId,
+    taskId: task.taskId,
+    status: task.status,
+    startedAt: task.startedAt,
+    ...(task.completedAt === undefined ? {} : { completedAt: task.completedAt }),
+    ...(task.exitCode === undefined ? {} : { exitCode: task.exitCode }),
+  };
 }
 
 /**

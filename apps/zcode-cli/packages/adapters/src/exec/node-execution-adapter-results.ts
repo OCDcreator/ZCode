@@ -167,10 +167,11 @@ export class NodeExecutionAdapterResults extends NodeExecutionAdapterBase {
     if (!persistedLimitReached) return result;
     return {
       ...result,
-      status: "cancelled",
+      // 输出超限是执行失败，需与独立监督者持久化的 failed 一致。
+      status: "failed",
       exitCode: 137,
       timedOut: false,
-      cancelled: true,
+      cancelled: false,
       error: {
         type: "output_limit",
         message: "Background command killed: output file exceeded 5GB",
